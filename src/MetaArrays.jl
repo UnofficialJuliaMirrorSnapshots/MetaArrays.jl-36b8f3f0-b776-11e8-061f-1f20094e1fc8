@@ -167,17 +167,15 @@ function Base.similar(x::MetaArray,::Type{S},dims::NTuple{<:Any,Int}) where S
   MetaArray(getmeta(x),similar(getcontents(x),S,dims))
 end
 
+# metawrap ensures that returned subarrays are properly wrapped in a meta
+# array, *without* wrapping individual elements, in the event that some custom,
+# non-integer index returns a single value
 metawrap(x::MetaArray{<:Any,<:Any,T},val::T) where T = val
-keepmeta(x::MetaArray,dims) = true
-function metawrap(x::MetaArray,val::AbstractArray)
-  keepmeta(x,val) ? MetaArray(getmeta(x),val) : val
-end
-metawrap(x::MetaArray,val::MetaArray) = val
+metawrap(x::MetaArray,val::AbstractArray) = MetaArray(getmeta(x),val)
 metawrap(x::MetaArray,val) = error("Unexpected result type $(typeof(val)).")
 
 # maintain stridedness of wrapped array, if present
 Base.strides(x::MetaArray) = strides(getcontents(x))
-Base.unsafe_convert(T::Type{<:Ptr},x::MetaArray) = unsafe_convert(T,getcontents(x))
 Base.stride(x::MetaArray,i::Int) = stride(getcontents(x),i)
 
 # the meta array broadcast style should retain the nested style information for
@@ -185,14 +183,22 @@ Base.stride(x::MetaArray,i::Int) = stride(getcontents(x),i)
 struct MetaArrayStyle{S} <: Broadcast.BroadcastStyle end
 MetaArrayStyle(s::S) where S <: Broadcast.BroadcastStyle = MetaArrayStyle{S}()
 Base.Broadcast.BroadcastStyle(::Type{<:MetaArray{A}}) where A =
-  MetaArrayStyle(Broadcast.BroadcastStyle(A))
+  metastyle(Broadcast.BroadcastStyle(A))
 Base.Broadcast.BroadcastStyle(a::MetaArrayStyle{A},b::MetaArrayStyle{B}) where {A,B} =
-  MetaArrayStyle(BradcastStyle(A(),B()))
+  metastyle(Broadcast.BroadcastStyle(A(),B()))
 function Base.Broadcast.BroadcastStyle(a::MetaArrayStyle{A},b::B) where
   {A,B<:Broadcast.BroadcastStyle}
 
-  MetaArrayStyle(Broadcast.BroadcastStyle(A(),b))
+  a_ = A()
+  left = metastyle(Broadcast.BroadcastStyle(a_,b))
+  if !(left isa Broadcast.Unknown)
+    left
+  else
+    metastyle(Broadcast.BroadcastStyle(b,a_))
+  end
 end
+metastyle(x) = MetaArrayStyle(x)
+metastyle(x::Broadcast.Unknown) = x
 
 ################################################################################
 # custom broadcast overloading
@@ -238,13 +244,9 @@ function Base.Broadcast.instantiate(bc::Broadcast.Broadcasted{M}) where
   Broadcast.Broadcasted{M}(bc_.f, args, bc_.axes)
 end
 
-# similar:
-function Base.similar(bc::Broadcast.Broadcasted{<:MetaArrayStyle{<:Any}},
-                      ::Type{T}) where T
-  # because the axes have been instantiated, we can safely assume the first
-  # argument contains the meta data
-  MetaArray(bc.args[1][1], similar(broadcasted, T))
-end
+# similar: becuase we bypass the default broadcast machinery no call to similar
+# is made directly: similar will be called within the nested call to `copy`
+# after the metadata has been stripped and the wrapped array is exposed
 
 # copyto!:
 function Base.copyto!(dest::AbstractArray,
